@@ -11,6 +11,15 @@ DEBUG = False
 
 ALLOWED_HOSTS = ["*"]
 
+# [修改] 從環境變數讀取 CSRF 設定
+# 邏輯：讀取字串 -> 用逗號切割 -> 去除空白 -> 過濾掉空字串
+csrf_trusted_origins_env = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
+
+if csrf_trusted_origins_env:
+    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_trusted_origins_env.split(",") if origin.strip()]
+else:
+    CSRF_TRUSTED_ORIGINS = []
+
 # === 2. Applications & Middleware ===
 INSTALLED_APPS = [
     "django.contrib.admin",
