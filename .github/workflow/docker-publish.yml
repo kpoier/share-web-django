@@ -1,0 +1,35 @@
+name: Build and Push to Docker Hub
+
+on:
+  push:
+    branches: [ "master" ]  # 當推送到 master 分支時觸發
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          # 設定 Build Context 為專案根目錄 (因為我們要把上一層的檔案 COPY 進去)
+          context: .
+          # 指定 Dockerfile 的位置
+          file: ./docker/Dockerfile
+          push: true
+          # 標籤：latest 和 commit SHA (方便回溯)
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/share-website:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/share-website:${{ github.sha }}

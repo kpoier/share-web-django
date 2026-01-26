@@ -1,0 +1,177 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Share Web | My Cloud</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="{% static 'core/css/style.css' %}">
+</head>
+<body>
+
+    <div class="top-bar container">
+        <div class="breadcrumbs">
+            {% if is_search %}
+                <span class="text-warning"><i class="bi bi-search"></i> <span class="d-none d-sm-inline">Search:</span> "{{ search_query }}"</span>
+                <a href="{% url 'home' %}" class="ms-3 text-secondary" style="font-size: 0.9em;"><i class="bi bi-x-circle"></i></a>
+            {% else %}
+                <span class="breadcrumb-item"><a href="{% url 'home' %}"><i class="bi bi-house-door-fill"></i> <span class="d-none d-sm-inline">Root</span></a></span>
+                {% for crumb in breadcrumbs %}
+                    <span class="text-secondary mx-1">/</span>
+                    <span class="breadcrumb-item"><a href="{% url 'resolve_path' crumb.path %}">{{ crumb.name }}</a></span>
+                {% endfor %}
+            {% endif %}
+        </div>
+
+        <div class="search-container">
+            <form method="get" action="{% url 'home' %}">
+                <input type="text" name="q" class="search-input" placeholder="Search..." value="{{ search_query|default:'' }}">
+                <button type="submit" class="search-btn"><i class="bi bi-search"></i></button>
+            </form>
+        </div>
+    </div>
+
+    {% if not is_search %}
+    <div class="toolbar container">
+        <button class="capsule-btn" onclick="document.getElementById('hidden-file-input').click()">
+            <i class="bi bi-cloud-arrow-up-fill"></i> <span class="d-none d-sm-inline">Upload File</span><span class="d-inline d-sm-none">File</span>
+        </button>
+        <button class="capsule-btn" onclick="document.getElementById('hidden-folder-input').click()">
+            <i class="bi bi-folder-plus"></i> <span class="d-none d-sm-inline">Upload Folder</span><span class="d-inline d-sm-none">Folder</span>
+        </button>
+        <button class="capsule-btn" onclick="createFolderPopup()">
+            <i class="bi bi-plus-circle-fill"></i> <span class="d-none d-sm-inline">New Folder</span><span class="d-inline d-sm-none">New</span>
+        </button>
+
+        <div class="toolbar-divider"></div>
+
+        <div class="dropdown">
+            <button class="capsule-btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" style="min-width: 80px; justify-content: space-between;">
+                {% if sort_params.current_sort == 'name' %}
+                    <span><i class="bi bi-sort-alpha-{% if sort_params.current_order == 'asc' %}down{% else %}up{% endif %}"></i> <span class="d-none d-md-inline">Name</span></span>
+                {% elif sort_params.current_sort == 'size' %}
+                    <span><i class="bi bi-sort-numeric-{% if sort_params.current_order == 'asc' %}down{% else %}up{% endif %}"></i> <span class="d-none d-md-inline">Size</span></span>
+                {% elif sort_params.current_sort == 'date' %}
+                    <span><i class="bi bi-calendar-event"></i> <span class="d-none d-md-inline">Date</span></span>
+                {% else %}
+                    <span><i class="bi bi-filter"></i> <span class="d-none d-md-inline">Sort</span></span>
+                {% endif %}
+            </button>
+            <ul class="dropdown-menu dropdown-menu-dark shadow">
+                <li><a class="dropdown-item d-flex justify-content-between align-items-center {% if sort_params.current_sort == 'name' %}active{% endif %}" href="?sort=name&order={{ sort_params.next_name_order }}"><span><i class="bi bi-sort-alpha-down me-2"></i> Name</span>{% if sort_params.current_sort == 'name' %}<small class="text-muted" style="font-size: 0.7em;">{% if sort_params.current_order == 'asc' %}A-Z{% else %}Z-A{% endif %}</small>{% endif %}</a></li>
+                <li><a class="dropdown-item d-flex justify-content-between align-items-center {% if sort_params.current_sort == 'size' %}active{% endif %}" href="?sort=size&order={{ sort_params.next_size_order }}"><span><i class="bi bi-sort-numeric-down me-2"></i> Size</span>{% if sort_params.current_sort == 'size' %}<small class="text-muted" style="font-size: 0.7em;">{% if sort_params.current_order == 'asc' %}Small{% else %}Big{% endif %}</small>{% endif %}</a></li>
+                <li><a class="dropdown-item d-flex justify-content-between align-items-center {% if sort_params.current_sort == 'date' %}active{% endif %}" href="?sort=date&order={{ sort_params.next_date_order }}"><span><i class="bi bi-calendar-event me-2"></i> Date</span>{% if sort_params.current_sort == 'date' %}<small class="text-muted" style="font-size: 0.7em;">{% if sort_params.current_order == 'asc' %}Old{% else %}New{% endif %}</small>{% endif %}</a></li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="hidden-form">
+        <form method="post" enctype="multipart/form-data" id="upload-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="upload">
+            <input type="file" name="file" id="hidden-file-input" multiple onchange="handleFileUpload()">
+        </form>
+        <form method="post" enctype="multipart/form-data" id="folder-upload-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="upload_folder">
+            <input type="hidden" name="paths" id="hidden-folder-paths">
+            <input type="file" name="folder_files" id="hidden-folder-input" webkitdirectory directory multiple onchange="handleFolderUpload()">
+        </form>
+        <form method="post" id="folder-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create_folder">
+            <input type="hidden" name="name" id="hidden-folder-name">
+        </form>
+    </div>
+    {% endif %}
+
+    {% if upload_form.errors or folder_form.errors %}
+        <div class="alert alert-danger text-center container" style="max-width: 600px;">
+            {{ upload_form.errors }}
+            {{ folder_form.errors }}
+        </div>
+    {% endif %}
+
+    <div class="file-list container p-0">
+        {% for folder in folders %}
+        <div class="list-item" onclick="handleRowClick('{% if is_search %}{% url 'resolve_path' folder.get_full_path %}{% else %}/{% if current_path %}{{ current_path }}/{% endif %}{{ folder.name }}/{% endif %}')">
+            <div class="item-name">
+                <i class="bi bi-folder-fill item-icon folder-icon"></i>
+                <div style="min-width: 0;">
+                    <div class="text-truncate fw-bold">{{ folder.name }}</div>
+                    {% if is_search %}<div class="text-truncate" style="font-size: 0.75rem; color: #666;">Loc: {{ folder.parent.name|default:"Root" }}</div>{% endif %}
+                </div>
+            </div>
+            <div class="item-actions">
+                <a href="{% url 'download_folder' folder.id %}" class="action-btn btn-primary-custom" title="Download Zip" onclick="stopProp(event)"><i class="bi bi-file-earmark-zip"></i></a>
+                <button onclick="renameItem(event, '{% url 'rename_folder' folder.id %}', '{{ folder.name }}')" class="action-btn d-none d-sm-flex" title="Rename"><i class="bi bi-pencil-square"></i></button>
+                <button onclick="deleteItem(event, '{% url 'delete_folder' folder.id %}', '{{ folder.name }}')" class="action-btn btn-danger-custom" title="Delete"><i class="bi bi-trash3-fill"></i></button>
+            </div>
+        </div>
+        {% endfor %}
+
+        {% for file_obj in files %}
+        <div class="list-item" onclick="handleRowClick('{% url 'short_download' file_obj.short_code %}')">
+            <div class="item-name">
+                <i class="bi bi-file-earmark-text-fill item-icon file-icon"></i>
+                <div style="min-width: 0;">
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="text-truncate fw-bold">{{ file_obj.filename }}</span>
+                        <span class="badge rounded-pill text-bg-secondary d-none d-sm-inline-block" style="font-size: 0.7rem; background-color: #333 !important; color: #aaa !important;">{{ file_obj.file.size|filesizeformat }}</span>
+                    </div>
+                    {% if is_search %}<div class="text-truncate" style="font-size: 0.75rem; color: #666;">Loc: {{ file_obj.folder.name|default:"Root" }}</div>{% endif %}
+                    <div class="d-none d-sm-block" style="font-size: 0.7rem; color: #555;">{{ file_obj.uploaded_at|date:"Y-m-d H:i" }}</div>
+                </div>
+            </div>
+            <div class="item-actions">
+                {% if file_obj.is_previewable %}
+                    <a href="{% url 'file_preview' file_obj.short_code %}" target="_blank" class="action-btn" title="Preview" onclick="stopProp(event)"><i class="bi bi-eye-fill"></i></a>
+                {% endif %}
+                <button onclick="renameItem(event, '{% url 'rename_file' file_obj.short_code %}', '{{ file_obj.filename }}')" class="action-btn d-none d-sm-flex" title="Rename"><i class="bi bi-pencil-square"></i></button>
+                <button onclick="deleteItem(event, '{% url 'delete_file' file_obj.short_code %}', '{{ file_obj.filename }}')" class="action-btn btn-danger-custom" title="Delete"><i class="bi bi-trash3-fill"></i></button>
+            </div>
+        </div>
+        {% empty %}
+            {% if not folders %}
+                <div class="empty-state">
+                    <i class="bi bi-inbox" style="font-size: 3rem; opacity: 0.5;"></i>
+                    <p>No files here.</p>
+                </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+
+    <div id="upload-progress-card" class="card shadow-lg">
+        <div class="card-body p-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="card-title m-0 d-flex align-items-center gap-2">
+                    <i class="bi bi-cloud-arrow-up-fill text-primary"></i> <span id="progress-title">Uploading...</span>
+                </h6>
+                <div class="d-flex align-items-center gap-2">
+                    <span id="progress-percent" class="fw-bold">0%</span>
+                    <button id="btn-toggle-details" class="btn btn-sm btn-outline-secondary rounded-circle" style="width: 24px; height: 24px; padding: 0; display: flex; align-items: center; justify-content: center;" onclick="toggleUploadDetails()"><i class="bi bi-chevron-down" style="font-size: 12px;"></i></button>
+                    <button id="btn-close-card" class="btn btn-sm btn-outline-danger rounded-circle" style="display: none; width: 24px; height: 24px; padding: 0; align-items: center; justify-content: center;" onclick="UploadManager.closeCard()"><i class="bi bi-x" style="font-size: 16px;"></i></button>
+                </div>
+            </div>
+            <div class="progress mb-2" role="progressbar" style="height: 8px; background-color: #333;"><div id="progress-bar-inner" class="progress-bar progress-bar-striped progress-bar-animated bg-primary" style="width: 0%"></div></div>
+            <small id="progress-status" class="text-muted d-block" style="font-size: 0.8rem;">Preparing...</small>
+            <div id="upload-details-panel" style="display: none; margin-top: 15px; border-top: 1px solid #333; padding-top: 10px;">
+                <div style="max-height: 200px; overflow-y: auto; padding-right: 5px;"><ul id="upload-file-list" class="list-unstyled m-0"></ul></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="drag-overlay">
+        <div class="drag-box">
+            <i class="bi bi-cloud-upload-fill" style="font-size: 4rem; color: #4db8ff; margin-bottom: 20px;"></i>
+            <h3>Drop files here</h3>
+            <p class="text-muted">Upload to current folder</p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{% static 'core/js/script.js' %}"></script>
+</body>
+</html>
