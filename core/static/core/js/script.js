@@ -62,7 +62,7 @@ function toggleUploadDetails() {
 const UploadManager = {
     queue: [], activeUploads: 0, maxConcurrent: 3, isUploading: false, hasError: false,
     
-    // [設定] 分片大小：50MB (Cloudflare 限制 100MB，留點緩衝)
+    // [設定] 分片大小：50MB
     CHUNK_SIZE: 50 * 1024 * 1024, 
 
     initUI() {
@@ -70,6 +70,8 @@ const UploadManager = {
         document.getElementById('upload-details-panel').style.display = 'block';
         document.querySelector('#btn-toggle-details i').className = 'bi bi-chevron-up';
         document.getElementById('btn-close-card').style.display = 'none';
+        
+        // 重置狀態
         this.hasError = false;
         this.updateUI();
     },
@@ -88,17 +90,16 @@ const UploadManager = {
         Array.from(fileList).forEach((file, i) => {
             const id = 'upload-' + Math.random().toString(36).substr(2, 9);
             let pathToSend = null;
-            // 處理資料夾上傳的路徑邏輯 (暫時不支援資料夾結構的分片上傳，這裡簡化為純檔案上傳)
-            // 如果要支援資料夾結構，後端 upload_chunk 邏輯會變得很複雜
-            // 這裡我們假設資料夾上傳時，裡面的檔案也走分片邏輯，但不帶目錄結構參數 (或是你需要後端再支援)
-            
-            // 產生一個唯一的 upload_id 給後端組裝用
-            const uploadUUID = crypto.randomUUID();
+            if (customPaths?.[i]) pathToSend = JSON.stringify([customPaths[i]]);
+            else if (isFolder) pathToSend = JSON.stringify([file.webkitRelativePath]);
 
+            const uploadUUID = crypto.randomUUID();
+            
             const item = { 
                 id, file, action, path: pathToSend, 
                 loaded: 0, total: file.size, xhr: null, status: 'pending', ui: null,
-                uploadUUID: uploadUUID
+                uploadUUID: uploadUUID,
+                chunkProgress: [] 
             };
             
             const li = document.createElement('li');
@@ -121,6 +122,8 @@ const UploadManager = {
             item.ui = li;
             this.queue.push(item);
         });
+        
+        this.updateUI(); 
         this.processQueue();
     },
 
@@ -132,24 +135,24 @@ const UploadManager = {
         }
     },
 
-    // [核心修改] 改為分片上傳邏輯
+    // [核心] 分片並發上傳邏輯
     async startUpload(item) {
         item.status = 'uploading';
         this.activeUploads++;
         
         const totalChunks = Math.ceil(item.file.size / this.CHUNK_SIZE);
-        const csrfToken = document.querySelector('input[name="csrfmiddlewaretoken"]').value;
+        item.chunkProgress = new Array(totalChunks).fill(0);
         
-        // 併發控制：同時允許幾個請求 (建議 3-5，過多會讓瀏覽器卡頓)
+        const csrfToken = document.querySelector('input[name="csrfmiddlewaretoken"]').value;
         const MAX_CONCURRENT_CHUNKS = 3;
         
         let activeRequests = 0;
         let nextChunkIndex = 0;
         let isAborted = false;
 
-        // 定義單一碎片上傳函數 (回傳 Promise)
         const uploadChunk = (index) => {
             return new Promise((resolve, reject) => {
+                // 如果已經取消，直接 reject
                 if (item.status === 'cancelled' || isAborted) {
                     reject('cancelled');
                     return;
@@ -165,20 +168,26 @@ const UploadManager = {
                 formData.append('file', chunk);
                 formData.append('upload_id', item.uploadUUID);
                 formData.append('chunk_index', index);
+                if (item.path) formData.append('paths', item.path);
 
                 const xhr = new XMLHttpRequest();
-                // 這裡我們不把 xhr 存到 item.xhr 了，因為有多個並發
-                // 如果需要取消，比較複雜，這裡簡化處理：設一個 flag 讓後續請求不發送
-                
                 xhr.open('POST', window.location.href, true);
 
-                // 監聽進度：只計算「已完成」的量，或者簡單估算
-                // 因為並發時計算精確進度比較複雜，我們這裡用「完成一片加一片」的方式更新
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        item.chunkProgress[index] = e.loaded;
+                        const totalLoaded = item.chunkProgress.reduce((acc, val) => acc + val, 0);
+                        item.loaded = Math.min(totalLoaded, item.file.size);
+                        this.updateItemUI(item);
+                        this.updateUI();
+                    }
+                };
+
                 xhr.onload = () => {
                     if (xhr.status >= 200 && xhr.status < 400) {
-                        // 更新進度條
-                        const loadedSize = (index + 1) * this.CHUNK_SIZE;
-                        item.loaded = Math.min(loadedSize, item.file.size);
+                        item.chunkProgress[index] = chunk.size; 
+                        const totalLoaded = item.chunkProgress.reduce((acc, val) => acc + val, 0);
+                        item.loaded = Math.min(totalLoaded, item.file.size);
                         this.updateItemUI(item);
                         this.updateUI();
                         resolve();
@@ -192,34 +201,28 @@ const UploadManager = {
             });
         };
 
-        // 併發執行器
         try {
             const promises = [];
-            
-            // 迴圈直到所有碎片都進入排程
             while (nextChunkIndex < totalChunks) {
-                // 如果正在跑的請求少於上限，就塞新的進去
+                // 檢查是否已取消 (避免繼續發送請求)
+                if (item.status === 'cancelled') { isAborted = true; break; }
+
                 if (activeRequests < MAX_CONCURRENT_CHUNKS) {
                     const currentIndex = nextChunkIndex++;
                     activeRequests++;
-                    
-                    const p = uploadChunk(currentIndex).then(() => {
-                        activeRequests--;
-                    });
+                    const p = uploadChunk(currentIndex)
+                        .then(() => { activeRequests--; })
+                        .catch((err) => { activeRequests--; throw err; }); // 失敗時也要扣除
                     promises.push(p);
                 }
-                
-                // 等待一下，讓事件迴圈處理 (避免卡死 UI)
                 if (activeRequests >= MAX_CONCURRENT_CHUNKS) {
-                    // 簡單等待：每 100ms 檢查一次是否有空位 (或是用更高級的 Promise.race)
                     await new Promise(r => setTimeout(r, 50));
                 }
             }
             
-            // 等待所有碎片傳完
             await Promise.all(promises);
 
-            // === 所有碎片都傳完了，發送合併請求 ===
+            // 合併請求 (只有在沒被取消的情況下)
             if (item.status !== 'cancelled') {
                 const formData = new FormData();
                 formData.append('csrfmiddlewaretoken', csrfToken);
@@ -227,6 +230,10 @@ const UploadManager = {
                 formData.append('upload_id', item.uploadUUID);
                 formData.append('filename', item.file.name);
                 formData.append('total_chunks', totalChunks);
+                if (item.action === 'upload_folder' && item.path) {
+                    formData.append('paths', item.path);
+                    formData.append('is_folder', 'true');
+                }
 
                 const xhr = new XMLHttpRequest();
                 xhr.open('POST', window.location.href, true);
@@ -241,120 +248,153 @@ const UploadManager = {
             }
 
         } catch (error) {
-            if (error !== 'cancelled') {
+            // 如果是因為取消而拋出的錯誤，我們不做任何事 (因為 cancel() 函數已經處理了)
+            if (error !== 'cancelled' && item.status !== 'cancelled') {
                 this.finishUpload(item, 'error');
             }
         }
     },
 
+    // [修復] 增加防止重複執行的判斷
     finishUpload(item, status) {
+        // 如果已經被標記為取消，就不再執行完成邏輯，避免 activeUploads 被扣兩次
+        if (item.status === 'cancelled') return;
+
         this.activeUploads--;
         item.status = status;
         if (status === 'error') this.hasError = true;
         
-        // 確保進度條跑滿
-        if (status === 'completed') item.loaded = item.total;
+        if (status === 'completed') {
+            item.loaded = item.total;
+        }
         
         this.updateItemUI(item);
         this.updateUI();
         this.processQueue();
-        this.checkFinished();
+        this.checkAllFinished();
     },
 
-    cancel: function(id) {
+    // [核心修復] 這裡修正了 activeUploads 計數錯誤的問題
+    cancel(id) {
         const item = this.queue.find(i => i.id === id);
         if (!item) return;
 
-        if (item.status === 'uploading' && item.xhr) {
-            item.xhr.abort();
+        // 只要是正在上傳中，就必須扣除計數器 (不管有沒有 xhr)
+        if (item.status === 'uploading') {
             this.activeUploads--;
+            // 注意：我們不需要手動 abort，因為 startUpload 裡的邏輯會檢測到 status 變更而停止
         }
 
-        this.totalBytes -= item.total;
-        this.loadedBytes -= item.loaded;
-
         item.status = 'cancelled';
+        item.loaded = 0; 
         
-        item.ui.classList.add('cancelled');
-        item.ui.querySelector('.item-name').style.textDecoration = 'line-through';
-        item.ui.querySelector('.item-percent').innerText = 'Cancelled';
-        item.ui.querySelector('.upload-item-progress-bar').style.backgroundColor = '#6c757d';
-        
-        const cancelBtn = item.ui.querySelector('.btn-cancel-upload');
-        if (cancelBtn) cancelBtn.remove();
+        // 視覺移除動畫
+        if (item.ui) {
+            item.ui.style.transition = "all 0.3s ease";
+            item.ui.style.opacity = "0";
+            item.ui.style.height = "0";
+            item.ui.style.margin = "0";
+            item.ui.style.padding = "0";
+            item.ui.style.border = "none"; 
+            setTimeout(() => {
+                if(item.ui) item.ui.remove();
+            }, 300);
+        }
 
-        setTimeout(() => {
-            if (item.ui) {
-                item.ui.style.transition = "opacity 0.5s ease, height 0.5s ease, margin 0.5s ease";
-                item.ui.style.opacity = "0";
-                item.ui.style.height = "0";
-                item.ui.style.margin = "0";
-                item.ui.style.padding = "0";
-                item.ui.style.overflow = "hidden";
-
-                setTimeout(() => {
-                    if (item.ui && item.ui.parentNode) {
-                        item.ui.remove();
-                    }
-                }, 500); 
-            }
-        }, 2000); 
-
-        this.updateGlobalProgress();
+        this.updateUI();
         this.processQueue();
-        
-        this.checkAllFinished(); 
+        this.checkAllFinished();
     },
 
     updateItemUI(item) {
         const percent = Math.round((item.loaded / item.total) * 100);
-        item.ui.querySelector('.upload-item-progress-bar').style.width = percent + '%';
-        const percentText = item.ui.querySelector('.item-percent');
-        
-        if (item.status === 'completed') {
-            item.ui.classList.add('completed');
-            item.ui.querySelector('.bi-file-earmark').className = 'bi bi-check-circle-fill text-success';
-            item.ui.querySelector('.upload-item-progress-bar').className += ' bg-success';
-            percentText.innerText = 'Done';
-            item.ui.querySelector('.btn-cancel-upload')?.remove();
-        } else if (item.status === 'error') {
-            item.ui.querySelector('.bi-file-earmark').className = 'bi bi-exclamation-circle-fill text-danger';
-            item.ui.querySelector('.upload-item-progress-bar').className += ' bg-danger';
-            percentText.innerText = 'Error';
-        } else {
-            percentText.innerText = percent + '%';
+        if (item.ui) {
+            item.ui.querySelector('.upload-item-progress-bar').style.width = percent + '%';
+            const percentText = item.ui.querySelector('.item-percent');
+            
+            if (item.status === 'completed') {
+                item.ui.classList.add('completed');
+                item.ui.querySelector('.bi-file-earmark').className = 'bi bi-check-circle-fill text-success';
+                item.ui.querySelector('.upload-item-progress-bar').className += ' bg-success';
+                percentText.innerText = 'Done';
+                item.ui.querySelector('.btn-cancel-upload')?.remove();
+            } else if (item.status === 'error') {
+                item.ui.querySelector('.bi-file-earmark').className = 'bi bi-exclamation-circle-fill text-danger';
+                item.ui.querySelector('.upload-item-progress-bar').className += ' bg-danger';
+                percentText.innerText = 'Error';
+            } else {
+                percentText.innerText = percent + '%';
+            }
         }
     },
 
     updateUI() {
-        const loaded = this.queue.reduce((acc, i) => acc + (i.status !== 'cancelled' ? i.loaded : 0), 0);
-        const total = this.queue.reduce((acc, i) => acc + (i.status !== 'cancelled' ? i.total : 0), 0) || 1;
-        const percent = Math.round((loaded / total) * 100);
+        let totalBytes = 0;
+        let loadedBytes = 0;
+
+        this.queue.forEach(item => {
+            if (item.status !== 'cancelled') {
+                totalBytes += item.total;
+                loadedBytes += item.loaded;
+            }
+        });
+
+        if (totalBytes === 0) {
+            document.getElementById('progress-bar-inner').style.width = '0%';
+            document.getElementById('progress-percent').innerText = '0%';
+            document.getElementById('progress-status').innerText = '0.00 MB / 0.00 MB';
+            return;
+        }
         
+        const percent = Math.round((loadedBytes / totalBytes) * 100);
         document.getElementById('progress-bar-inner').style.width = percent + '%';
         document.getElementById('progress-percent').innerText = percent + '%';
+        
+        const loadedMB = (loadedBytes / 1024 / 1024).toFixed(2);
+        const totalMB = (totalBytes / 1024 / 1024).toFixed(2);
         document.getElementById('progress-status').innerText = 
-            `${(loaded / 1024 / 1024).toFixed(2)} MB / ${(total / 1024 / 1024).toFixed(2)} MB`;
+            `${loadedMB} MB / ${totalMB} MB`;
     },
 
-    checkFinished() {
-        if (!this.queue.some(i => i.status === 'pending') && this.activeUploads === 0) {
+    checkAllFinished: function() {
+        const isProcessing = this.queue.some(i => i.status === 'pending' || i.status === 'uploading');
+
+        // [關鍵] 當沒有任何處理中的任務，且 activeUploads 確實歸零
+        if (!isProcessing && this.activeUploads === 0) {
             const statusText = document.getElementById('progress-status');
-            if (this.hasError) {
-                statusText.innerHTML = '<span class="text-danger">Completed with errors.</span>';
-                document.getElementById('progress-bar-inner').className = 'progress-bar bg-warning';
-                document.getElementById('btn-close-card').style.display = 'flex';
+            const hasCompletedOrError = this.queue.some(i => i.status === 'completed' || i.status === 'error');
+
+            if (hasCompletedOrError) {
+                if (this.hasError) {
+                    statusText.innerHTML = '<span class="text-danger">Completed with errors.</span>';
+                    document.getElementById('progress-bar-inner').className = 'progress-bar bg-warning';
+                    document.getElementById('btn-close-card').style.display = 'flex';
+                } else {
+                    statusText.innerText = 'All finished! Reloading...';
+                    setTimeout(() => { window.location.reload(); }, 2000);
+                }
             } else {
-                statusText.innerText = 'All finished! Reloading...';
-                setTimeout(() => window.location.reload(), 2000);
+                statusText.innerText = 'All cancelled. Closing...';
+                setTimeout(() => {
+                    const card = document.getElementById('upload-progress-card');
+                    card.style.opacity = '0';
+                    setTimeout(() => {
+                        card.style.display = 'none';
+                        card.style.opacity = '1';
+                        this.queue = [];
+                        this.hasError = false;
+                        document.getElementById('upload-file-list').innerHTML = '';
+                    }, 500);
+                }, 1500);
             }
         }
     }
 };
 
-// === 3. Drag & Drop Logic (Recursive) ===
+// === 3. Drag & Drop Logic ===
 (function() {
-    if (('ontouchstart' in window) || (navigator.maxTouchPoints > 0)) return; // No drag on mobile
+    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    if (isTouchDevice) return;
 
     const overlay = document.getElementById('drag-overlay');
     let dragCounter = 0;
