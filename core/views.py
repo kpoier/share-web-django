@@ -3,13 +3,11 @@ import json
 import mimetypes
 import zipfile
 import io
-import uuid
 
 from django.shortcuts import render, redirect, get_object_or_404, Http404
-from django.http import FileResponse, HttpResponse, HttpResponseNotFound
-from django.db.models import Q
-from django.core.exceptions import ObjectDoesNotExist
-
+from django.http import FileResponse, HttpResponseNotFound, HttpResponse
+from django.conf import settings
+from django.core.files import File  # [新增] 用來包裝暫存檔
 from .models import FileModel, Folder
 from .forms import UploadForm, FolderForm
 
@@ -54,13 +52,9 @@ def preview_file(request, short_code):
         return HttpResponseNotFound("Preview unavailable.")
 
 # === 2. 核心路徑解析 (主頁面) ===
-
 def path_resolver(request, resource_path):
-    """
-    處理首頁、資料夾瀏覽、搜尋以及檔案上傳邏輯。
-    """
     try:
-        # A. 搜尋模式
+        # A. 搜尋
         search_query = request.GET.get('q')
         if search_query:
             context = {
@@ -71,47 +65,42 @@ def path_resolver(request, resource_path):
             }
             return render(request, 'index.html', context)
 
-        # B. 路徑解析與麵包屑
+        # B. 解析路徑
         parts = [p for p in resource_path.split('/') if p]
         current_folder = None
         breadcrumbs = []
-        
-        # 逐層解析路徑
         temp_path = ""
+        
         for part in parts:
             try:
                 current_folder = Folder.objects.get(parent=current_folder, name=part)
                 temp_path = f"{temp_path}/{part}" if temp_path else part
                 breadcrumbs.append({'name': part, 'path': temp_path})
             except Folder.DoesNotExist:
-                # 若找不到資料夾，檢查是否為路徑最後一節的檔案 (用於短網址跳轉兼容)
                 if part == parts[-1]:
                     try:
                         target = FileModel.objects.get(folder=current_folder, file__icontains=part)
                         return redirect('short_download', short_code=target.short_code)
                     except FileModel.DoesNotExist:
                         pass
-                print(f"[error] Path not found: {part}")
-                raise Http404(f"Folder or file '{part}' does not exist.")
+                raise Http404(f"Path not found: {part}")
 
-        # C. 表單處理 (POST)
+        # C. 處理 POST
         if request.method == 'POST':
             action = request.POST.get('action')
             return handle_post_action(request, action, current_folder, resource_path)
 
-        # D. 資料準備與排序
+        # D. 顯示資料
         folders = Folder.objects.filter(parent=current_folder)
         files = list(FileModel.objects.filter(folder=current_folder))
 
-        # 排序邏輯
+        # 排序
         sort_by = request.GET.get('sort', 'date')
         order = request.GET.get('order', 'desc')
-        
         apply_sorting(folders, files, sort_by, order)
-
-        # 下一次點擊的排序狀態
-        next_order = lambda s: 'desc' if sort_by == s and order == 'asc' else 'asc'
         
+        next_order = lambda s: 'desc' if sort_by == s and order == 'asc' else 'asc'
+
         context = {
             'upload_form': UploadForm(),
             'folder_form': FolderForm(),
@@ -132,55 +121,60 @@ def path_resolver(request, resource_path):
         return render(request, 'index.html', context)
 
     except Exception as e:
-        print(f"[error] Path Resolver Crash: {e}")
+        print(f"[error] Path Resolver: {e}")
         return redirect('home')
 
 # === 3. 輔助函數 (重構用) ===
-
 def handle_post_action(request, action, current_folder, resource_path):
-    """處理上傳與建立資料夾的 POST 請求"""
     try:
-        # === A. 處理分片上傳 (新功能) ===
+        # 1. 分片上傳
         if action == 'upload_chunk':
             file_chunk = request.FILES.get('file')
-            upload_id = request.POST.get('upload_id')      # 前端生成的唯一 ID
-            chunk_index = int(request.POST.get('chunk_index')) # 第幾片 (0, 1, 2...)
+            upload_id = request.POST.get('upload_id')
+            chunk_index = int(request.POST.get('chunk_index'))
             total_chunks = int(request.POST.get('total_chunks'))
             filename = request.POST.get('filename')
             
-            # 建立暫存資料夾
+            # 確保暫存目錄存在
             temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks')
             if not os.path.exists(temp_dir):
                 os.makedirs(temp_dir)
             
-            # 暫存檔案路徑 (用 upload_id 區分不同檔案)
             temp_file_path = os.path.join(temp_dir, f"{upload_id}.part")
 
-            # 1. 寫入碎片 (Append 模式)
-            # 注意：這裡假設前端是「依序」發送 (0 -> 1 -> 2)，所以用 append ('ab')
+            # 寫入分片
             with open(temp_file_path, 'ab') as f:
                 for chunk in file_chunk.chunks():
                     f.write(chunk)
 
-            # 2. 如果是最後一片，進行收尾
+            # 如果是最後一片
             if chunk_index == total_chunks - 1:
-                # 建立 DB 物件 (這會決定最終路徑)
-                # 我們先建立一個「空」的 FileModel，讓 Django 幫我們算好路徑
-                new_file = FileModel(folder=current_folder)
-                new_file.file.save(filename, open(temp_file_path, 'rb'), save=True)
+                print(f"[info] Finalizing upload: {filename}")
                 
-                # 刪除暫存檔
-                os.remove(temp_file_path)
-                print(f"[info] Chunked upload completed: {filename}")
+                # [關鍵修正] 使用 with open 來讀取，確保讀完後會自動關閉檔案
+                with open(temp_file_path, 'rb') as f:
+                    # 使用 Django 的 File wrapper 比較安全
+                    django_file = File(f)
+                    
+                    # 建立新檔案紀錄
+                    new_file = FileModel(folder=current_folder)
+                    # save=True 會觸發 storage 的存檔動作
+                    new_file.file.save(filename, django_file, save=True)
                 
-            return HttpResponse("Chunk received") # 回傳簡單的成功訊息即可，不需要 redirect
+                # [關鍵] 此時檔案已經關閉 (with 區塊結束)，可以安全刪除暫存檔
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+                    print(f"[info] Temp file deleted: {temp_file_path}")
 
-        # === B. 一般上傳 (保留給不支援 JS 的環境，或是小檔備用) ===
+            return HttpResponse("Chunk received")
+
+        # 2. 一般上傳
         elif action == 'upload':
             files = request.FILES.getlist('file')
             for f in files:
                 FileModel.objects.create(file=f, folder=current_folder)
 
+        # 3. 建立資料夾
         elif action == 'create_folder':
             form = FolderForm(request.POST)
             if form.is_valid():
@@ -188,12 +182,12 @@ def handle_post_action(request, action, current_folder, resource_path):
                 folder.parent = current_folder
                 folder.save()
 
+        # 4. 資料夾上傳
         elif action == 'upload_folder':
             files = request.FILES.getlist('folder_files')
             paths = json.loads(request.POST.get('paths', '[]'))
             if files and paths:
                 for file_obj, rel_path in zip(files, paths):
-                    # 解析路徑結構: "A/B/file.txt" -> create folders A, B -> save file
                     path_parts = rel_path.split('/')
                     target_folder = current_folder
                     for folder_name in path_parts[:-1]:
@@ -204,7 +198,7 @@ def handle_post_action(request, action, current_folder, resource_path):
 
     except Exception as e:
         print(f"[error] POST action '{action}' failed: {e}")
-        # 如果是分片上傳失敗，回傳 500 讓前端知道要重試
+        # 如果是分片上傳，回傳錯誤狀態碼讓前端知道
         if action == 'upload_chunk':
              return HttpResponse(str(e), status=500)
 
