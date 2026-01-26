@@ -103,3 +103,10 @@ MEDIA_ROOT = BASE_DIR / "uploads"
 
 # === 7. Others ===
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+
+# 分片上傳的暫存目錄
+FILE_UPLOAD_TEMP_DIR = os.path.join(MEDIA_ROOT, 'temp_chunks')
+
+if not os.path.exists(FILE_UPLOAD_TEMP_DIR):
+    os.makedirs(FILE_UPLOAD_TEMP_DIR)

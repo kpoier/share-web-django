@@ -3,9 +3,10 @@ import json
 import mimetypes
 import zipfile
 import io
+import uuid
 
 from django.shortcuts import render, redirect, get_object_or_404, Http404
-from django.http import FileResponse, HttpResponseNotFound
+from django.http import FileResponse, HttpResponse, HttpResponseNotFound
 from django.db.models import Q
 from django.core.exceptions import ObjectDoesNotExist
 
@@ -139,7 +140,43 @@ def path_resolver(request, resource_path):
 def handle_post_action(request, action, current_folder, resource_path):
     """處理上傳與建立資料夾的 POST 請求"""
     try:
-        if action == 'upload':
+        # === A. 處理分片上傳 (新功能) ===
+        if action == 'upload_chunk':
+            file_chunk = request.FILES.get('file')
+            upload_id = request.POST.get('upload_id')      # 前端生成的唯一 ID
+            chunk_index = int(request.POST.get('chunk_index')) # 第幾片 (0, 1, 2...)
+            total_chunks = int(request.POST.get('total_chunks'))
+            filename = request.POST.get('filename')
+            
+            # 建立暫存資料夾
+            temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks')
+            if not os.path.exists(temp_dir):
+                os.makedirs(temp_dir)
+            
+            # 暫存檔案路徑 (用 upload_id 區分不同檔案)
+            temp_file_path = os.path.join(temp_dir, f"{upload_id}.part")
+
+            # 1. 寫入碎片 (Append 模式)
+            # 注意：這裡假設前端是「依序」發送 (0 -> 1 -> 2)，所以用 append ('ab')
+            with open(temp_file_path, 'ab') as f:
+                for chunk in file_chunk.chunks():
+                    f.write(chunk)
+
+            # 2. 如果是最後一片，進行收尾
+            if chunk_index == total_chunks - 1:
+                # 建立 DB 物件 (這會決定最終路徑)
+                # 我們先建立一個「空」的 FileModel，讓 Django 幫我們算好路徑
+                new_file = FileModel(folder=current_folder)
+                new_file.file.save(filename, open(temp_file_path, 'rb'), save=True)
+                
+                # 刪除暫存檔
+                os.remove(temp_file_path)
+                print(f"[info] Chunked upload completed: {filename}")
+                
+            return HttpResponse("Chunk received") # 回傳簡單的成功訊息即可，不需要 redirect
+
+        # === B. 一般上傳 (保留給不支援 JS 的環境，或是小檔備用) ===
+        elif action == 'upload':
             files = request.FILES.getlist('file')
             for f in files:
                 FileModel.objects.create(file=f, folder=current_folder)
@@ -167,6 +204,9 @@ def handle_post_action(request, action, current_folder, resource_path):
 
     except Exception as e:
         print(f"[error] POST action '{action}' failed: {e}")
+        # 如果是分片上傳失敗，回傳 500 讓前端知道要重試
+        if action == 'upload_chunk':
+             return HttpResponse(str(e), status=500)
 
     return redirect('resolve_path', resource_path=resource_path) if resource_path else redirect('home')
 

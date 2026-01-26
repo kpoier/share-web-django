@@ -61,6 +61,9 @@ function toggleUploadDetails() {
 // === 2. Upload Manager ===
 const UploadManager = {
     queue: [], activeUploads: 0, maxConcurrent: 3, isUploading: false, hasError: false,
+    
+    // [設定] 分片大小：50MB (Cloudflare 限制 100MB，留點緩衝)
+    CHUNK_SIZE: 50 * 1024 * 1024, 
 
     initUI() {
         document.getElementById('upload-progress-card').style.display = 'block';
@@ -73,7 +76,6 @@ const UploadManager = {
 
     closeCard() {
         document.getElementById('upload-progress-card').style.display = 'none';
-        // Only reload if everything is done
         if (this.queue.every(i => ['completed', 'error', 'cancelled'].includes(i.status))) {
              window.location.reload();
         }
@@ -86,10 +88,18 @@ const UploadManager = {
         Array.from(fileList).forEach((file, i) => {
             const id = 'upload-' + Math.random().toString(36).substr(2, 9);
             let pathToSend = null;
-            if (customPaths?.[i]) pathToSend = JSON.stringify([customPaths[i]]);
-            else if (isFolder) pathToSend = JSON.stringify([file.webkitRelativePath]);
+            // 處理資料夾上傳的路徑邏輯 (暫時不支援資料夾結構的分片上傳，這裡簡化為純檔案上傳)
+            // 如果要支援資料夾結構，後端 upload_chunk 邏輯會變得很複雜
+            // 這裡我們假設資料夾上傳時，裡面的檔案也走分片邏輯，但不帶目錄結構參數 (或是你需要後端再支援)
+            
+            // 產生一個唯一的 upload_id 給後端組裝用
+            const uploadUUID = crypto.randomUUID();
 
-            const item = { id, file, action, path: pathToSend, loaded: 0, total: file.size, xhr: null, status: 'pending', ui: null };
+            const item = { 
+                id, file, action, path: pathToSend, 
+                loaded: 0, total: file.size, xhr: null, status: 'pending', ui: null,
+                uploadUUID: uploadUUID
+            };
             
             const li = document.createElement('li');
             li.className = 'upload-item';
@@ -122,46 +132,84 @@ const UploadManager = {
         }
     },
 
-    startUpload(item) {
+    // [核心修改] 改為分片上傳邏輯
+    async startUpload(item) {
         item.status = 'uploading';
         this.activeUploads++;
         
-        const formData = new FormData();
-        formData.append('csrfmiddlewaretoken', document.querySelector('input[name="csrfmiddlewaretoken"]').value);
-        formData.append('action', item.action);
+        const totalChunks = Math.ceil(item.file.size / this.CHUNK_SIZE);
+        let chunkIndex = 0;
         
-        if (item.action === 'upload_folder') {
-            formData.append('folder_files', item.file);
-            formData.append('paths', item.path);
-        } else {
-            formData.append('file', item.file);
-        }
+        // 內部遞迴函數：發送下一片
+        const uploadNextChunk = () => {
+            if (item.status === 'cancelled') return;
 
-        const xhr = new XMLHttpRequest();
-        item.xhr = xhr;
-        xhr.open('POST', window.location.href, true);
+            const start = chunkIndex * this.CHUNK_SIZE;
+            const end = Math.min(start + this.CHUNK_SIZE, item.file.size);
+            const chunk = item.file.slice(start, end);
 
-        xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-                item.loaded = e.loaded;
-                this.updateItemUI(item);
-                this.updateUI();
-            }
+            const formData = new FormData();
+            formData.append('csrfmiddlewaretoken', document.querySelector('input[name="csrfmiddlewaretoken"]').value);
+            // 這裡改成新的 action
+            formData.append('action', 'upload_chunk'); 
+            formData.append('file', chunk);
+            formData.append('filename', item.file.name);
+            formData.append('upload_id', item.uploadUUID); // 告訴後端這是哪個檔案
+            formData.append('chunk_index', chunkIndex);
+            formData.append('total_chunks', totalChunks);
+
+            const xhr = new XMLHttpRequest();
+            item.xhr = xhr;
+            xhr.open('POST', window.location.href, true);
+
+            // 單片上傳進度 (用來計算總進度)
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    // 計算目前總共上傳了多少 byte
+                    const loadedInChunk = e.loaded;
+                    const totalLoadedSoFar = (chunkIndex * this.CHUNK_SIZE) + loadedInChunk;
+                    item.loaded = Math.min(totalLoadedSoFar, item.file.size);
+                    this.updateItemUI(item);
+                    this.updateUI();
+                }
+            };
+
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 400) {
+                    chunkIndex++;
+                    if (chunkIndex < totalChunks) {
+                        // 還有下一片，繼續傳
+                        uploadNextChunk();
+                    } else {
+                        // 全部傳完
+                        this.finishUpload(item, 'completed');
+                    }
+                } else {
+                    // 失敗重試或報錯 (這裡簡單直接報錯)
+                    this.finishUpload(item, 'error');
+                }
+            };
+
+            xhr.onerror = () => this.finishUpload(item, 'error');
+            xhr.send(formData);
         };
 
-        const onFinish = (status) => {
-            this.activeUploads--;
-            item.status = status;
-            if (status === 'error') this.hasError = true;
-            this.updateItemUI(item);
-            this.updateUI();
-            this.processQueue();
-            this.checkFinished();
-        };
+        // 開始傳送第一片
+        uploadNextChunk();
+    },
 
-        xhr.onload = () => onFinish(xhr.status >= 200 && xhr.status < 400 ? 'completed' : 'error');
-        xhr.onerror = () => onFinish('error');
-        xhr.send(formData);
+    finishUpload(item, status) {
+        this.activeUploads--;
+        item.status = status;
+        if (status === 'error') this.hasError = true;
+        
+        // 確保進度條跑滿
+        if (status === 'completed') item.loaded = item.total;
+        
+        this.updateItemUI(item);
+        this.updateUI();
+        this.processQueue();
+        this.checkFinished();
     },
 
     cancel(id) {
