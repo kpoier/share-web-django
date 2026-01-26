@@ -41,7 +41,7 @@ docker-compose -f docker/docker-compose.yml up --build
 
 
 3. **Access**
-Open [http://localhost:8000](https://www.google.com/search?q=http://localhost:8000)
+Open [http://localhost:8080](https://www.google.com/search?q=http://localhost:8080)
 
 ---
 
@@ -63,7 +63,7 @@ services:
     restart: always
     
     ports:
-      - "8000:8000"
+      - "8080:8080"
     
     volumes:
       # Persist data (Ensure these files/folders exist relative to this yaml)
@@ -77,7 +77,7 @@ services:
       - SECRET_KEY=change-this-to-a-secure-random-key-in-production
     
     # Auto collect static files & migrate DB on startup
-    command: sh -c "python manage.py collectstatic --noinput && python manage.py migrate && python manage.py runserver 0.0.0.0:8000 --insecure"
+    command: sh -c "python manage.py collectstatic --noinput && python manage.py migrate && python manage.py runserver 0.0.0.0:8080 --insecure"
 
 ```
 

@@ -31,5 +31,5 @@ jobs:
           push: true
           # 標籤：latest 和 commit SHA (方便回溯)
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/share-website:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/share-website:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/share-web-django:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/share-web-django:${{ github.sha }}
