@@ -22,7 +22,7 @@ Simple, fast, and supports drag-and-drop uploads.
 - **Frontend**: Bootstrap 5 + Vanilla JS
 - **Server**: WhiteNoise (Static files) + Gunicorn (Production ready)
 
-## 🐳 Local Development (開發環境)
+## 🐳 Local Development
 
 1. **Clone the repo**
    ```bash
@@ -45,7 +45,7 @@ Open [http://localhost:8000](https://www.google.com/search?q=http://localhost:80
 
 ---
 
-## 📦 Server Deployment (伺服器部署)
+## 📦 Server Deployment
 
 This project is configured to automatically push images to **[kpoier/share-web-django](https://www.google.com/search?q=https://hub.docker.com/r/kpoier/share-web-django)** on Docker Hub whenever changes are pushed to the `master` branch.
 
@@ -54,8 +54,6 @@ This project is configured to automatically push images to **[kpoier/share-web-d
 You **do not** need the source code on your server. Just create this single file:
 
 ```yaml
-version: '3.8'
-
 services:
   web:
     # Pulls the latest image from your Docker Hub
