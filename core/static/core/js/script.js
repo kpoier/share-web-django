@@ -261,7 +261,7 @@ const UploadManager = {
         this.checkFinished();
     },
 
-    cancel(id) {
+    cancel: function(id) {
         const item = this.queue.find(i => i.id === id);
         if (!item) return;
 
@@ -270,15 +270,40 @@ const UploadManager = {
             this.activeUploads--;
         }
 
+        this.totalBytes -= item.total;
+        this.loadedBytes -= item.loaded;
+
         item.status = 'cancelled';
         
-        if (item.ui) {
-            item.ui.remove();
-        }
+        item.ui.classList.add('cancelled');
+        item.ui.querySelector('.item-name').style.textDecoration = 'line-through';
+        item.ui.querySelector('.item-percent').innerText = 'Cancelled';
+        item.ui.querySelector('.upload-item-progress-bar').style.backgroundColor = '#6c757d';
+        
+        const cancelBtn = item.ui.querySelector('.btn-cancel-upload');
+        if (cancelBtn) cancelBtn.remove();
 
-        this.updateUI();
+        setTimeout(() => {
+            if (item.ui) {
+                item.ui.style.transition = "opacity 0.5s ease, height 0.5s ease, margin 0.5s ease";
+                item.ui.style.opacity = "0";
+                item.ui.style.height = "0";
+                item.ui.style.margin = "0";
+                item.ui.style.padding = "0";
+                item.ui.style.overflow = "hidden";
+
+                setTimeout(() => {
+                    if (item.ui && item.ui.parentNode) {
+                        item.ui.remove();
+                    }
+                }, 500); 
+            }
+        }, 2000); 
+
+        this.updateGlobalProgress();
         this.processQueue();
-        this.checkFinished();
+        
+        this.checkAllFinished(); 
     },
 
     updateItemUI(item) {
