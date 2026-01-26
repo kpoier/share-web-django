@@ -127,74 +127,63 @@ def path_resolver(request, resource_path):
 # === 3. 輔助函數 (重構用) ===
 def handle_post_action(request, action, current_folder, resource_path):
     try:
-        # 1. 分片上傳
+        # 1. 分片上傳 (只負責存碎片)
         if action == 'upload_chunk':
             file_chunk = request.FILES.get('file')
             upload_id = request.POST.get('upload_id')
             chunk_index = int(request.POST.get('chunk_index'))
-            total_chunks = int(request.POST.get('total_chunks'))
-            filename = request.POST.get('filename')
             
             # 確保暫存目錄存在
             temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks')
             if not os.path.exists(temp_dir):
                 os.makedirs(temp_dir)
             
-            temp_file_path = os.path.join(temp_dir, f"{upload_id}.part")
+            # 存成獨立的小檔案：{upload_id}_{chunk_index}
+            # 這樣並發寫入時才不會打架
+            temp_file_path = os.path.join(temp_dir, f"{upload_id}_{chunk_index}")
 
-            # 寫入分片
-            with open(temp_file_path, 'ab') as f:
+            with open(temp_file_path, 'wb') as f:
                 for chunk in file_chunk.chunks():
                     f.write(chunk)
 
-            # 如果是最後一片
-            if chunk_index == total_chunks - 1:
-                print(f"[info] Finalizing upload: {filename}")
-                
-                # [關鍵修正] 使用 with open 來讀取，確保讀完後會自動關閉檔案
-                with open(temp_file_path, 'rb') as f:
-                    # 使用 Django 的 File wrapper 比較安全
-                    django_file = File(f)
+            return HttpResponse("Chunk saved")
+
+        # 2. 合併請求 (新功能：所有碎片傳完後觸發)
+        elif action == 'complete_upload':
+            upload_id = request.POST.get('upload_id')
+            filename = request.POST.get('filename')
+            total_chunks = int(request.POST.get('total_chunks'))
+            
+            temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks')
+            final_temp_path = os.path.join(temp_dir, f"{upload_id}_final")
+
+            print(f"[info] Merging {total_chunks} chunks for {filename}...")
+
+            # 開始合併
+            with open(final_temp_path, 'wb') as final_file:
+                for i in range(total_chunks):
+                    chunk_path = os.path.join(temp_dir, f"{upload_id}_{i}")
+                    if not os.path.exists(chunk_path):
+                        raise Exception(f"Missing chunk {i}")
                     
-                    # 建立新檔案紀錄
-                    new_file = FileModel(folder=current_folder)
-                    # save=True 會觸發 storage 的存檔動作
-                    new_file.file.save(filename, django_file, save=True)
-                
-                # [關鍵] 此時檔案已經關閉 (with 區塊結束)，可以安全刪除暫存檔
-                if os.path.exists(temp_file_path):
-                    os.remove(temp_file_path)
-                    print(f"[info] Temp file deleted: {temp_file_path}")
+                    # 讀取碎片寫入總檔
+                    with open(chunk_path, 'rb') as chunk_file:
+                        final_file.write(chunk_file.read())
+                    
+                    # 寫完立刻刪除碎片，釋放空間
+                    os.remove(chunk_path)
 
-            return HttpResponse("Chunk received")
+            # 儲存到 Django FileModel
+            with open(final_temp_path, 'rb') as f:
+                django_file = File(f)
+                new_file = FileModel(folder=current_folder)
+                new_file.file.save(filename, django_file, save=True)
+            
+            # 刪除暫存總檔
+            if os.path.exists(final_temp_path):
+                os.remove(final_temp_path)
 
-        # 2. 一般上傳
-        elif action == 'upload':
-            files = request.FILES.getlist('file')
-            for f in files:
-                FileModel.objects.create(file=f, folder=current_folder)
-
-        # 3. 建立資料夾
-        elif action == 'create_folder':
-            form = FolderForm(request.POST)
-            if form.is_valid():
-                folder = form.save(commit=False)
-                folder.parent = current_folder
-                folder.save()
-
-        # 4. 資料夾上傳
-        elif action == 'upload_folder':
-            files = request.FILES.getlist('folder_files')
-            paths = json.loads(request.POST.get('paths', '[]'))
-            if files and paths:
-                for file_obj, rel_path in zip(files, paths):
-                    path_parts = rel_path.split('/')
-                    target_folder = current_folder
-                    for folder_name in path_parts[:-1]:
-                        target_folder, _ = Folder.objects.get_or_create(
-                            parent=target_folder, name=folder_name
-                        )
-                    FileModel.objects.create(file=file_obj, folder=target_folder)
+            return HttpResponse("Upload completed")
 
     except Exception as e:
         print(f"[error] POST action '{action}' failed: {e}")

@@ -138,64 +138,113 @@ const UploadManager = {
         this.activeUploads++;
         
         const totalChunks = Math.ceil(item.file.size / this.CHUNK_SIZE);
-        let chunkIndex = 0;
+        const csrfToken = document.querySelector('input[name="csrfmiddlewaretoken"]').value;
         
-        // 內部遞迴函數：發送下一片
-        const uploadNextChunk = () => {
-            if (item.status === 'cancelled') return;
+        // 併發控制：同時允許幾個請求 (建議 3-5，過多會讓瀏覽器卡頓)
+        const MAX_CONCURRENT_CHUNKS = 3;
+        
+        let activeRequests = 0;
+        let nextChunkIndex = 0;
+        let isAborted = false;
 
-            const start = chunkIndex * this.CHUNK_SIZE;
-            const end = Math.min(start + this.CHUNK_SIZE, item.file.size);
-            const chunk = item.file.slice(start, end);
-
-            const formData = new FormData();
-            formData.append('csrfmiddlewaretoken', document.querySelector('input[name="csrfmiddlewaretoken"]').value);
-            // 這裡改成新的 action
-            formData.append('action', 'upload_chunk'); 
-            formData.append('file', chunk);
-            formData.append('filename', item.file.name);
-            formData.append('upload_id', item.uploadUUID); // 告訴後端這是哪個檔案
-            formData.append('chunk_index', chunkIndex);
-            formData.append('total_chunks', totalChunks);
-
-            const xhr = new XMLHttpRequest();
-            item.xhr = xhr;
-            xhr.open('POST', window.location.href, true);
-
-            // 單片上傳進度 (用來計算總進度)
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    // 計算目前總共上傳了多少 byte
-                    const loadedInChunk = e.loaded;
-                    const totalLoadedSoFar = (chunkIndex * this.CHUNK_SIZE) + loadedInChunk;
-                    item.loaded = Math.min(totalLoadedSoFar, item.file.size);
-                    this.updateItemUI(item);
-                    this.updateUI();
+        // 定義單一碎片上傳函數 (回傳 Promise)
+        const uploadChunk = (index) => {
+            return new Promise((resolve, reject) => {
+                if (item.status === 'cancelled' || isAborted) {
+                    reject('cancelled');
+                    return;
                 }
-            };
 
-            xhr.onload = () => {
-                if (xhr.status >= 200 && xhr.status < 400) {
-                    chunkIndex++;
-                    if (chunkIndex < totalChunks) {
-                        // 還有下一片，繼續傳
-                        uploadNextChunk();
+                const start = index * this.CHUNK_SIZE;
+                const end = Math.min(start + this.CHUNK_SIZE, item.file.size);
+                const chunk = item.file.slice(start, end);
+
+                const formData = new FormData();
+                formData.append('csrfmiddlewaretoken', csrfToken);
+                formData.append('action', 'upload_chunk');
+                formData.append('file', chunk);
+                formData.append('upload_id', item.uploadUUID);
+                formData.append('chunk_index', index);
+
+                const xhr = new XMLHttpRequest();
+                // 這裡我們不把 xhr 存到 item.xhr 了，因為有多個並發
+                // 如果需要取消，比較複雜，這裡簡化處理：設一個 flag 讓後續請求不發送
+                
+                xhr.open('POST', window.location.href, true);
+
+                // 監聽進度：只計算「已完成」的量，或者簡單估算
+                // 因為並發時計算精確進度比較複雜，我們這裡用「完成一片加一片」的方式更新
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 400) {
+                        // 更新進度條
+                        const loadedSize = (index + 1) * this.CHUNK_SIZE;
+                        item.loaded = Math.min(loadedSize, item.file.size);
+                        this.updateItemUI(item);
+                        this.updateUI();
+                        resolve();
                     } else {
-                        // 全部傳完
-                        this.finishUpload(item, 'completed');
+                        reject('error');
                     }
-                } else {
-                    // 失敗重試或報錯 (這裡簡單直接報錯)
-                    this.finishUpload(item, 'error');
-                }
-            };
-
-            xhr.onerror = () => this.finishUpload(item, 'error');
-            xhr.send(formData);
+                };
+                
+                xhr.onerror = () => reject('error');
+                xhr.send(formData);
+            });
         };
 
-        // 開始傳送第一片
-        uploadNextChunk();
+        // 併發執行器
+        try {
+            const promises = [];
+            
+            // 迴圈直到所有碎片都進入排程
+            while (nextChunkIndex < totalChunks) {
+                // 如果正在跑的請求少於上限，就塞新的進去
+                if (activeRequests < MAX_CONCURRENT_CHUNKS) {
+                    const currentIndex = nextChunkIndex++;
+                    activeRequests++;
+                    
+                    const p = uploadChunk(currentIndex).then(() => {
+                        activeRequests--;
+                    });
+                    promises.push(p);
+                }
+                
+                // 等待一下，讓事件迴圈處理 (避免卡死 UI)
+                if (activeRequests >= MAX_CONCURRENT_CHUNKS) {
+                    // 簡單等待：每 100ms 檢查一次是否有空位 (或是用更高級的 Promise.race)
+                    await new Promise(r => setTimeout(r, 50));
+                }
+            }
+            
+            // 等待所有碎片傳完
+            await Promise.all(promises);
+
+            // === 所有碎片都傳完了，發送合併請求 ===
+            if (item.status !== 'cancelled') {
+                const formData = new FormData();
+                formData.append('csrfmiddlewaretoken', csrfToken);
+                formData.append('action', 'complete_upload');
+                formData.append('upload_id', item.uploadUUID);
+                formData.append('filename', item.file.name);
+                formData.append('total_chunks', totalChunks);
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', window.location.href, true);
+                xhr.onload = () => {
+                    if (xhr.status === 200) {
+                        this.finishUpload(item, 'completed');
+                    } else {
+                        this.finishUpload(item, 'error');
+                    }
+                };
+                xhr.send(formData);
+            }
+
+        } catch (error) {
+            if (error !== 'cancelled') {
+                this.finishUpload(item, 'error');
+            }
+        }
     },
 
     finishUpload(item, status) {
@@ -215,12 +264,18 @@ const UploadManager = {
     cancel(id) {
         const item = this.queue.find(i => i.id === id);
         if (!item) return;
+
         if (item.status === 'uploading' && item.xhr) {
             item.xhr.abort();
             this.activeUploads--;
         }
+
         item.status = 'cancelled';
-        item.ui.classList.add('cancelled');
+        
+        if (item.ui) {
+            item.ui.remove();
+        }
+
         this.updateUI();
         this.processQueue();
         this.checkFinished();
