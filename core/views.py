@@ -127,8 +127,17 @@ def path_resolver(request, resource_path):
 # === 3. 輔助函數 (重構用) ===
 def handle_post_action(request, action, current_folder, resource_path):
     try:
+        # 0. 建立新資料夾
+        if action == 'create_folder':
+            form = FolderForm(request.POST)
+            if form.is_valid():
+                folder = form.save(commit=False)
+                folder.parent = current_folder
+                folder.save()
+            return redirect('resolve_path', resource_path=resource_path) if resource_path else redirect('home')
+
         # 1. 分片上傳 (只負責存碎片)
-        if action == 'upload_chunk':
+        elif action == 'upload_chunk':
             file_chunk = request.FILES.get('file')
             upload_id = request.POST.get('upload_id')
             chunk_index = int(request.POST.get('chunk_index'))
@@ -153,6 +162,8 @@ def handle_post_action(request, action, current_folder, resource_path):
             upload_id = request.POST.get('upload_id')
             filename = request.POST.get('filename')
             total_chunks = int(request.POST.get('total_chunks'))
+            is_folder = request.POST.get('is_folder') == 'true'
+            paths = json.loads(request.POST.get('paths', '[]')) if is_folder else []
             
             temp_dir = os.path.join(settings.MEDIA_ROOT, 'temp_chunks')
             final_temp_path = os.path.join(temp_dir, f"{upload_id}_final")
@@ -173,10 +184,20 @@ def handle_post_action(request, action, current_folder, resource_path):
                     # 寫完立刻刪除碎片，釋放空間
                     os.remove(chunk_path)
 
+            target_folder = current_folder
+            if is_folder and paths:
+                rel_path = paths[0]
+                path_parts = rel_path.split('/')
+                # 解析路徑結構: "A/B/file.txt" -> create folders A, B -> save file
+                for folder_name in path_parts[:-1]:
+                    target_folder, _ = Folder.objects.get_or_create(
+                        parent=target_folder, name=folder_name
+                    )
+
             # 儲存到 Django FileModel
             with open(final_temp_path, 'rb') as f:
                 django_file = File(f)
-                new_file = FileModel(folder=current_folder)
+                new_file = FileModel(folder=target_folder)
                 new_file.file.save(filename, django_file, save=True)
             
             # 刪除暫存總檔
@@ -184,6 +205,25 @@ def handle_post_action(request, action, current_folder, resource_path):
                 os.remove(final_temp_path)
 
             return HttpResponse("Upload completed")
+
+        # 3. 處理傳統上傳 (防呆，如果前端關閉分片上傳的話)
+        elif action == 'upload':
+            files = request.FILES.getlist('file')
+            for f in files:
+                FileModel.objects.create(file=f, folder=current_folder)
+
+        elif action == 'upload_folder':
+            files = request.FILES.getlist('folder_files')
+            paths = json.loads(request.POST.get('paths', '[]'))
+            if files and paths:
+                for file_obj, rel_path in zip(files, paths):
+                    path_parts = rel_path.split('/')
+                    target_folder = current_folder
+                    for folder_name in path_parts[:-1]:
+                        target_folder, _ = Folder.objects.get_or_create(
+                            parent=target_folder, name=folder_name
+                        )
+                    FileModel.objects.create(file=file_obj, folder=target_folder)
 
     except Exception as e:
         print(f"[error] POST action '{action}' failed: {e}")
