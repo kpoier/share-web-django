@@ -106,6 +106,7 @@
             </div>
             <div class="item-actions">
                 <a href="{% url 'download_folder' folder.id %}" class="action-btn btn-primary-custom" title="Download Zip" onclick="stopProp(event)"><i class="bi bi-file-earmark-zip"></i></a>
+                <button onclick="copyDownloadUrl(event, '{% url 'download_folder' folder.id %}')" class="action-btn" title="Copy Link"><i class="bi bi-link-45deg"></i></button>
                 <button onclick="renameItem(event, '{% url 'rename_folder' folder.id %}', '{{ folder.name }}')" class="action-btn d-none d-sm-flex" title="Rename"><i class="bi bi-pencil-square"></i></button>
                 <button onclick="deleteItem(event, '{% url 'delete_folder' folder.id %}', '{{ folder.name }}')" class="action-btn btn-danger-custom" title="Delete"><i class="bi bi-trash3-fill"></i></button>
             </div>
@@ -126,6 +127,7 @@
                 </div>
             </div>
             <div class="item-actions">
+                <button onclick="copyDownloadUrl(event, '{% url 'short_download' file_obj.short_code %}')" class="action-btn" title="Copy Link"><i class="bi bi-link-45deg"></i></button>
                 {% if file_obj.is_previewable %}
                     <a href="{% url 'file_preview' file_obj.short_code %}" target="_blank" class="action-btn" title="Preview" onclick="stopProp(event)"><i class="bi bi-eye-fill"></i></a>
                 {% endif %}

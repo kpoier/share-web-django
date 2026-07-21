@@ -2,6 +2,44 @@
 const handleRowClick = (url) => { if (url) window.location.href = url; };
 const stopProp = (e) => e.stopPropagation();
 
+function copyDownloadUrl(e, url) {
+    e.stopPropagation();
+    const btn = e.currentTarget;
+    const fullUrl = window.location.origin + url;
+
+    const copyToClipboard = () => {
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(fullUrl);
+        } else {
+            const textArea = document.createElement("textarea");
+            textArea.value = fullUrl;
+            textArea.style.position = "fixed";
+            textArea.style.left = "-999999px";
+            textArea.style.top = "-999999px";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            return new Promise((resolve, reject) => {
+                document.execCommand('copy') ? resolve() : reject();
+                textArea.remove();
+            });
+        }
+    };
+
+    copyToClipboard().then(() => {
+        const icon = btn.querySelector('i');
+        if (icon) {
+            const originalClass = icon.className;
+            icon.className = 'bi bi-check-lg text-success';
+            setTimeout(() => {
+                icon.className = originalClass;
+            }, 1500);
+        }
+    }).catch(err => {
+        console.error('Failed to copy download URL: ', err);
+    });
+}
+
 function createFolderPopup() {
     const name = prompt("Please enter new folder name:");
     if (name?.trim()) {
