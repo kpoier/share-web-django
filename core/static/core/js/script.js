@@ -431,9 +431,7 @@ const UploadManager = {
 
 // === 3. Drag & Drop Logic ===
 (function() {
-    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
-    if (isTouchDevice) return;
-
+    // Touch-capable computers can still drag files with a mouse or trackpad.
     const overlay = document.getElementById('drag-overlay');
     let dragCounter = 0;
 
